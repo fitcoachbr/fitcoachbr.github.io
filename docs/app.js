@@ -45,7 +45,7 @@ const DB = (() => {
 /* ---------- estado ---------- */
 const KEYS = ['profile', 'settings', 'meals', 'days', 'weights', 'photos', 'plan', 'chat', 'challenge'];
 const S = {
-  profile: null, settings: { apiKey: '', model: 'gemini-flash-latest' },
+  profile: null, settings: { apiKey: '', model: 'auto' },
   meals: [], days: {}, weights: [], photos: [], plan: {}, chat: [], challenge: {},
   tab: 'hoje', planTab: 'dieta', editPerfil: false, sel: [], busy: {}, typing: false,
 };
@@ -127,41 +127,78 @@ function parseJSON(t) {
     throw new Error('A IA respondeu num formato inesperado. Tente de novo.');
   }
 }
+/* Usa TODOS os modelos grátis que a chave da pessoa enxerga, revezando quando um está ocupado ou sem cota. */
+const API = 'https://generativelanguage.googleapis.com/v1beta/models';
+const RESERVA = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite', 'gemini-2.0-flash-lite', 'gemma-3-27b-it', 'gemma-3-12b-it'];
+const FORA = /embedding|tts|image|imagen|veo|live|audio|aqa|robotics|computer-use|learnlm|exp-|nano|-e\d+b|1b-it|4b-it/i;
+function rankModel(n) {
+  const v = parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0');
+  const tam = parseFloat((n.match(/(\d+)b-it/) || [])[1] || '0');
+  let s = /gemma/.test(n) ? 10 : /lite/.test(n) ? 60 : /flash/.test(n) ? 80 : /pro/.test(n) ? 40 : 20;
+  if (/-latest$/.test(n)) s += 4;
+  return s * 10 + v * 3 - (/preview/.test(n) ? 0.5 : 0) + tam / 100; // mais novo primeiro
+}
+async function listModels(force) {
+  const st = S.settings;
+  if (!force && st.models?.length && Date.now() - (st.modelsAt || 0) < 864e5) return st.models;
+  try {
+    const r = await fetch(`${API}?pageSize=200`, { headers: { 'x-goog-api-key': st.apiKey } });
+    const d = await r.json();
+    if (r.ok) {
+      const ms = (d.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+        .map(m => m.name.replace('models/', '')).filter(n => /^(gemini|gemma)/.test(n) && !FORA.test(n));
+      if (ms.length) { st.models = ms.sort((a, b) => rankModel(b) - rankModel(a)); st.modelsAt = Date.now(); save('settings'); }
+    }
+  } catch { /* sem lista: usa a reserva */ }
+  return st.models?.length ? st.models : RESERVA;
+}
+// Pausa modelos que falharam, para não perder tempo com eles: ocupado 1 min, sem cota 15 min, não suportado 1 dia.
+const pausa = (() => { try { return JSON.parse(localStorage.getItem('fit-pausa') || '{}'); } catch { return {}; } })();
+function pausar(m, ms) { pausa[m] = Date.now() + ms; try { localStorage.setItem('fit-pausa', JSON.stringify(pausa)); } catch { } }
+function corpo(model, { prompt, image, json, history, system }) {
+  const gemma = /^gemma/.test(model); // Gemma não aceita instrução de sistema nem modo JSON: vai tudo no texto
+  let texto = prompt;
+  if (gemma && system) texto = `${system}\n\n---\n${texto}`;
+  if (gemma && json) texto += '\nResponda somente com o JSON, sem texto antes ou depois.';
+  const parts = [];
+  if (image) parts.push({ inlineData: { mimeType: 'image/jpeg', data: image.split(',')[1] } });
+  parts.push({ text: texto });
+  const body = { contents: [...history, { role: 'user', parts }], generationConfig: { temperature: json ? 0.4 : 0.8 } };
+  if (json && !gemma) body.generationConfig.responseMimeType = 'application/json';
+  if (system && !gemma) body.systemInstruction = { parts: [{ text: system }] };
+  return body;
+}
 async function gemini({ prompt, image, json = true, history = [], system }) {
   const key = S.settings.apiKey;
   if (!key) throw new Error('Configure sua chave do Gemini na aba Eu → Inteligência artificial.');
   if (!navigator.onLine) throw new Error('Sem internet. A IA precisa de conexão; o resto do app funciona offline.');
-  const parts = [];
-  if (image) parts.push({ inlineData: { mimeType: 'image/jpeg', data: image.split(',')[1] } });
-  parts.push({ text: prompt });
-  const body = { contents: [...history, { role: 'user', parts }], generationConfig: { temperature: json ? 0.4 : 0.8 } };
-  if (json) body.generationConfig.responseMimeType = 'application/json';
-  if (system) body.systemInstruction = { parts: [{ text: system }] };
-  // Se um modelo estiver congestionado ou sem cota, tenta de novo e depois passa para modelos reserva.
-  const models = [...new Set([S.settings.model || 'gemini-flash-latest', 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite'])];
-  const wait = ms => new Promise(res => setTimeout(res, ms));
+  let models = await listModels();
+  const fixo = S.settings.model;
+  if (fixo && fixo !== 'auto') models = [fixo, ...models.filter(m => m !== fixo)];
+  if (image) models = models.filter(m => !/gemma-3-(1|4)b/.test(m));
+  const agora = Date.now();
+  const fila = [...models.filter(m => !(pausa[m] > agora)), ...models.filter(m => pausa[m] > agora)];
   let d, last = '';
-  for (const model of models) {
-    for (let tentativa = 0; tentativa < 2; tentativa++) {
-      let r;
-      try {
-        r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body),
-        });
-      } catch { throw new Error('Não consegui falar com o Gemini. Verifique a internet.'); }
-      d = await r.json().catch(() => ({}));
-      if (r.ok) break;
-      const m = d.error?.message || '';
-      if (/API key/i.test(m) || r.status === 403) throw new Error('Chave do Gemini inválida. Confira na aba Eu.');
-      last = r.status === 429 ? 'cota' : 'ocupado';
-      d = null;
-      if (r.status === 429 || r.status === 404 || r.status === 400) break; // não adianta repetir: vai para o próximo modelo
-      await wait(1500 * (tentativa + 1)); // 500/503: servidor congestionado, espera um pouco
-    }
-    if (d) break;
+  for (const model of fila) {
+    let r;
+    try {
+      r = await fetch(`${API}/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify(corpo(model, { prompt, image, json, history, system })),
+      });
+    } catch { throw new Error('Não consegui falar com o Gemini. Verifique a internet.'); }
+    d = await r.json().catch(() => ({}));
+    if (r.ok && (d.candidates?.[0]?.content?.parts || []).some(p => p.text)) { S.lastModel = model; break; }
+    const m = d.error?.message || '';
+    if (/API key/i.test(m) || r.status === 403) throw new Error('Chave do Gemini inválida. Confira na aba Eu.');
+    if (r.status === 429) { last = 'cota'; pausar(model, 15 * 6e4); }
+    else if (r.status === 404 || r.status === 400) pausar(model, 864e5);
+    else if (r.ok) pausar(model, 6e4); // respondeu vazio (ex.: bloqueou a imagem): tenta outro
+    else { last ||= 'ocupado'; pausar(model, 6e4); }
+    d = null;
   }
   if (!d) throw new Error(last === 'cota'
-    ? 'Você usou o limite grátis do Gemini por agora. Espere alguns minutos e tente de novo.'
+    ? 'Você usou o limite grátis de todos os modelos do Gemini por agora. Espere alguns minutos e tente de novo.'
     : 'Os servidores do Gemini estão congestionados agora. Tente de novo em 1 ou 2 minutos.');
   const txt = (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
   if (!txt) throw new Error('A IA não respondeu (talvez a imagem tenha sido bloqueada). Tente outra foto.');
@@ -441,7 +478,10 @@ VIEWS.eu = () => {
     <p class="muted small">O app usa o Google Gemini (grátis). Cada pessoa usa a própria chave, que fica salva só neste celular.</p>
     <ol class="small" style="padding-left:18px"><li>Abra <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> e entre com sua conta Google.</li><li>Toque em <b>Create API key</b> e copie a chave.</li><li>Cole abaixo e toque em Salvar.</li></ol>
     <label>Chave do Gemini</label><input id="apiKey" type="password" autocomplete="off" value="${esc(S.settings.apiKey)}" placeholder="Cole aqui">
-    <label>Modelo</label><input id="model" value="${esc(S.settings.model)}">
+    <label>Modelo</label><select id="model"><option value="auto">Automático: reveza todos os grátis (recomendado)</option>
+      ${(S.settings.models || []).map(m => `<option value="${esc(m)}" ${S.settings.model === m ? 'selected' : ''}>Começar por ${esc(m)}</option>`).join('')}</select>
+    ${S.settings.models?.length ? `<p class="muted small">${S.settings.models.length} modelos grátis encontrados na sua chave${S.lastModel ? ` · último usado: <b>${esc(S.lastModel)}</b>` : ''}.</p>
+      <details class="small muted"><summary>Ver a lista</summary><p class="mono" style="font-size:11px;line-height:1.7">${S.settings.models.map(esc).join('<br>')}</p></details>` : ''}
     <div class="row" style="margin-top:10px"><button class="primary grow" data-a="salvarKey">Salvar</button><button class="grow" data-a="testarKey">Testar</button></div>
     <p class="muted small">No plano grátis, o Google pode usar o que é enviado (fotos e perguntas) para melhorar os produtos dele.</p></div>
   <div class="card"><h3>💾 Backup</h3><p class="muted small">Seus dados ficam só neste celular. Faça backup de vez em quando (salve no iCloud Drive, por exemplo).</p>
@@ -712,8 +752,19 @@ Responda APENAS em JSON: {"original":{"kcal":0,"prot":0,"carb":0,"gord":0},"opco
   },
   editPerfil: () => { S.editPerfil = true; render(); window.scrollTo(0, 0); },
   cancelPerfil: () => { S.editPerfil = false; render(); },
-  salvarKey: () => { S.settings.apiKey = $('#apiKey').value.trim(); S.settings.model = $('#model').value.trim() || 'gemini-flash-latest'; save('settings'); toast('Salvo ✅'); render(); },
-  testarKey: async () => { A.salvarKey(); toast('Testando…'); try { await gemini({ prompt: 'Responda só: ok', json: false }); toast('Funcionando! ✅'); } catch (e) { toast(e.message); } },
+  salvarKey: async () => {
+    const nova = $('#apiKey').value.trim(), mudou = nova !== S.settings.apiKey;
+    S.settings.apiKey = nova; S.settings.model = $('#model').value || 'auto';
+    if (mudou) { S.settings.models = []; S.settings.modelsAt = 0; }
+    save('settings'); toast('Salvo ✅');
+    if (nova && mudou) await listModels(true);
+    render();
+  },
+  testarKey: async () => {
+    await A.salvarKey(); toast('Testando…');
+    try { await listModels(true); await gemini({ prompt: 'Responda só: ok', json: false }); render(); toast(`Funcionando com ${S.lastModel} ✅`); }
+    catch (e) { toast(e.message); }
+  },
   exportar,
   importar: () => $('#fileBackup').click(),
   apagarTudo: async () => { if (!confirm('Apagar TODOS os dados deste celular? Não dá para desfazer. Faça backup antes.')) return; await DB.clear(); location.reload(); },
@@ -770,6 +821,7 @@ $('#fileBackup').addEventListener('change', e => { const f = e.target.files[0]; 
 (async () => {
   try { for (const k of KEYS) { const v = await DB.get(k); if (v !== undefined) S[k] = v; } }
   catch { toast('Não consegui abrir os dados salvos.'); }
+  if (!S.settings.model || S.settings.model === 'gemini-flash-latest') S.settings.model = 'auto'; // versões antigas fixavam um modelo
   render();
   navigator.storage?.persist?.();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
