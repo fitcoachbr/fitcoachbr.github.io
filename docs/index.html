@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1512">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Fit Coach">
+<title>Fit Coach</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main id="view" aria-live="polite"></main>
+<nav id="tabs" hidden>
+  <button data-tab="hoje"><span>🏠</span>Hoje</button>
+  <button data-tab="coach"><span>💬</span>Coach</button>
+  <button data-tab="plano"><span>📋</span>Plano</button>
+  <button data-tab="progresso"><span>📈</span>Progresso</button>
+  <button data-tab="eu"><span>👤</span>Eu</button>
+</nav>
+<div id="sheet" hidden><div class="sheet-card" id="sheetBody"></div></div>
+<div id="toast" hidden></div>
+<input type="file" id="filePrato" accept="image/*" hidden>
+<input type="file" id="fileEvolucao" accept="image/*" hidden>
+<input type="file" id="fileBackup" accept="application/json,.json" hidden>
+<script src="app.js"></script>
+</body>
+</html>
