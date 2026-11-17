@@ -137,20 +137,32 @@ async function gemini({ prompt, image, json = true, history = [], system }) {
   const body = { contents: [...history, { role: 'user', parts }], generationConfig: { temperature: json ? 0.4 : 0.8 } };
   if (json) body.generationConfig.responseMimeType = 'application/json';
   if (system) body.systemInstruction = { parts: [{ text: system }] };
-  let r;
-  try {
-    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.settings.model || 'gemini-flash-latest')}:generateContent`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body),
-    });
-  } catch { throw new Error('Não consegui falar com o Gemini. Verifique a internet.'); }
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const m = d.error?.message || '';
-    if (r.status === 429) throw new Error('Limite grátis do Gemini atingido por agora. Espere alguns minutos e tente de novo.');
-    if (/API key/i.test(m) || r.status === 403) throw new Error('Chave do Gemini inválida. Confira na aba Eu.');
-    if (r.status === 404) throw new Error('Modelo não encontrado. Na aba Eu, use "gemini-flash-latest".');
-    throw new Error('Erro do Gemini: ' + (m || r.status));
+  // Se um modelo estiver congestionado ou sem cota, tenta de novo e depois passa para modelos reserva.
+  const models = [...new Set([S.settings.model || 'gemini-flash-latest', 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite'])];
+  const wait = ms => new Promise(res => setTimeout(res, ms));
+  let d, last = '';
+  for (const model of models) {
+    for (let tentativa = 0; tentativa < 2; tentativa++) {
+      let r;
+      try {
+        r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body),
+        });
+      } catch { throw new Error('Não consegui falar com o Gemini. Verifique a internet.'); }
+      d = await r.json().catch(() => ({}));
+      if (r.ok) break;
+      const m = d.error?.message || '';
+      if (/API key/i.test(m) || r.status === 403) throw new Error('Chave do Gemini inválida. Confira na aba Eu.');
+      last = r.status === 429 ? 'cota' : 'ocupado';
+      d = null;
+      if (r.status === 429 || r.status === 404 || r.status === 400) break; // não adianta repetir: vai para o próximo modelo
+      await wait(1500 * (tentativa + 1)); // 500/503: servidor congestionado, espera um pouco
+    }
+    if (d) break;
   }
+  if (!d) throw new Error(last === 'cota'
+    ? 'Você usou o limite grátis do Gemini por agora. Espere alguns minutos e tente de novo.'
+    : 'Os servidores do Gemini estão congestionados agora. Tente de novo em 1 ou 2 minutos.');
   const txt = (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
   if (!txt) throw new Error('A IA não respondeu (talvez a imagem tenha sido bloqueada). Tente outra foto.');
   return json ? parseJSON(txt) : txt.trim();
