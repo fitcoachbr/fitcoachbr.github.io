@@ -215,16 +215,17 @@ VIEWS.hoje = () => {
   const t = targets(), k = dkey(), tot = totals(k), d = day(k), st = streak();
   const pct = Math.min(1, tot.kcal / t.kcal), R = 56, C = 2 * Math.PI * R;
   const rest = t.kcal - r0(tot.kcal);
-  const bar = (l, v, m, col) => `<div class="macro"><div class="row between"><span>${l}</span><span class="muted">${r0(v)} / ${m} g</span></div><div class="bar"><i style="width:${Math.min(100, v / m * 100)}%;background:${col}"></i></div></div>`;
+  const bar = (l, v, m, col) => `<div class="macro"><div class="row between"><span>${l}</span><span class="muted">${r0(v)} / ${m} g</span></div><div class="bar"><i style="width:${Math.min(100, v / m * 100)}%;background:${col};color:${col}"></i></div></div>`;
   const ms = mealsOf(k);
   const hum = ['😫', '😕', '😐', '🙂', '😄'];
-  return `<div class="row between"><h1>Olá, ${esc(S.profile.nome.split(' ')[0])}</h1><span class="pill">🔥 ${st} dia${st === 1 ? '' : 's'}</span></div>
+  return `<div class="eyebrow">${wd(k)} · ${fmtD(k)} · meta <b>${t.kcal} kcal</b></div>
+  <div class="row between"><h1 style="margin-top:6px">Olá, ${esc(S.profile.nome.split(' ')[0])}</h1><span class="pill ${st ? 'hot' : ''}">🔥 ${st} DIA${st === 1 ? '' : 'S'}</span></div>
   ${!S.settings.apiKey ? `<div class="card warn" data-a="goEu">⚠️ Configure sua chave grátis do Gemini para usar foto do prato e o Coach. Toque aqui.</div>` : ''}
-  <div class="card row">
-    <div class="ring"><svg width="132" height="132"><circle cx="66" cy="66" r="${R}" stroke="#212c26" stroke-width="12" fill="none"/>
-      <circle cx="66" cy="66" r="${R}" stroke="${rest < -t.kcal * 0.1 ? '#fbbf24' : '#4ade80'}" stroke-width="12" fill="none" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct)}"/></svg>
+  <div class="card hero row">
+    <div class="ring"><svg viewBox="0 0 136 136" width="100%" height="100%"><circle cx="68" cy="68" r="${R}" stroke="#161616" stroke-width="10" fill="none"/>
+      <circle cx="68" cy="68" r="${R}" stroke="${rest < -t.kcal * 0.1 ? '#ffb020' : '#c6ff3d'}" stroke-width="10" fill="none" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct)}"/></svg>
       <div class="c"><b>${Math.abs(rest)}</b><span class="muted small">${rest >= 0 ? 'kcal restantes' : 'kcal acima'}</span></div></div>
-    <div class="grow">${bar('Proteína', tot.prot, t.prot, '#f472b6')}${bar('Carboidrato', tot.carb, t.carb, '#60a5fa')}${bar('Gordura', tot.gord, t.gord, '#fbbf24')}
+    <div class="grow">${bar('Proteína', tot.prot, t.prot, '#ff3d8b')}${bar('Carboidrato', tot.carb, t.carb, '#3dd6ff')}${bar('Gordura', tot.gord, t.gord, '#ffb020')}
       <div class="muted small">${r0(tot.kcal)} de ${t.kcal} kcal</div></div>
   </div>
   <div class="big-actions">
@@ -238,7 +239,7 @@ VIEWS.hoje = () => {
   <h2>Hábitos</h2>
   <div class="card">
     <div class="row between"><b>💧 Água</b><span class="muted">${d.agua} / ${t.agua} ml</span></div>
-    <div class="bar"><i style="width:${Math.min(100, d.agua / t.agua * 100)}%;background:#60a5fa"></i></div>
+    <div class="bar"><i style="width:${Math.min(100, d.agua / t.agua * 100)}%;background:#3dd6ff"></i></div>
     <div class="row" style="margin-top:10px"><button class="grow" data-a="agua" data-v="250">+ copo 250</button><button class="grow" data-a="agua" data-v="500">+ garrafa 500</button><button data-a="agua" data-v="-250">−</button></div>
   </div>
   <div class="card">
@@ -321,7 +322,7 @@ VIEWS.progresso = () => {
   const sel = S.sel;
   return `<h1>Progresso</h1>
   <div class="card"><div class="row between"><h3>⚖️ Peso</h3><span class="muted small">${p.pesoMeta ? `meta ${esc(p.pesoMeta)} kg` : ''}</span></div>
-    <p style="font-size:28px;margin:2px 0"><b>${atual}</b> kg</p>
+    <p class="stat" style="margin:2px 0"><b>${atual}</b> kg</p>
     ${lineChart(ws.slice(-20).map(w => ({ l: fmtD(w.date), y: w.kg })), num(p.pesoMeta))}
     <div class="row" style="margin-top:10px"><input id="novoPeso" class="grow" type="number" inputmode="decimal" step="0.1" placeholder="Peso de hoje (kg)"><button class="primary" data-a="peso">Registrar</button></div></div>
   <div class="card"><h3>🔥 Calorias dos últimos 7 dias</h3>${barChart(last7.map(k => r0(totals(k).kcal)), last7.map(wd), t.kcal)}
@@ -372,20 +373,20 @@ function lineChart(pts, meta) {
   const X = i => L + i * (W - L - 10) / (pts.length - 1), Y = v => 8 + (mx - v) / (mx - mn) * (H - 16);
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(p.y).toFixed(1)}`).join('');
   return `<svg class="chart" viewBox="0 0 ${W} ${H + 16}">
-    ${meta ? `<line x1="${L}" x2="${W}" y1="${Y(meta)}" y2="${Y(meta)}" stroke="#4ade80" stroke-dasharray="4 4" opacity=".6"/><text x="0" y="${Y(meta) + 4}" fill="#4ade80" font-size="10">meta</text>` : ''}
-    <text x="0" y="12" fill="#94a69b" font-size="10">${mx.toFixed(0)}</text><text x="0" y="${H}" fill="#94a69b" font-size="10">${mn.toFixed(0)}</text>
-    <path d="${d}" fill="none" stroke="#60a5fa" stroke-width="2.5" stroke-linejoin="round"/>
-    ${pts.map((p, i) => `<circle cx="${X(i)}" cy="${Y(p.y)}" r="3" fill="#60a5fa"/>`).join('')}
-    <text x="${L}" y="${H + 14}" fill="#94a69b" font-size="10">${pts[0].l}</text><text x="${W}" y="${H + 14}" fill="#94a69b" font-size="10" text-anchor="end">${pts.at(-1).l}</text></svg>`;
+    ${meta ? `<line x1="${L}" x2="${W}" y1="${Y(meta)}" y2="${Y(meta)}" stroke="#c6ff3d" stroke-dasharray="4 4" opacity=".6"/><text x="0" y="${Y(meta) + 4}" fill="#c6ff3d" font-size="10">meta</text>` : ''}
+    <text x="0" y="12" fill="#7d7d7d" font-size="10">${mx.toFixed(0)}</text><text x="0" y="${H}" fill="#7d7d7d" font-size="10">${mn.toFixed(0)}</text>
+    <path d="${d}" fill="none" stroke="#3dd6ff" stroke-width="2.5" stroke-linejoin="round"/>
+    ${pts.map((p, i) => `<circle cx="${X(i)}" cy="${Y(p.y)}" r="3" fill="#3dd6ff"/>`).join('')}
+    <text x="${L}" y="${H + 14}" fill="#7d7d7d" font-size="10">${pts[0].l}</text><text x="${W}" y="${H + 14}" fill="#7d7d7d" font-size="10" text-anchor="end">${pts.at(-1).l}</text></svg>`;
 }
 function barChart(vals, labels, meta) {
   const W = 320, H = 120, L = 26, max = Math.max(meta * 1.3, ...vals, 1), bw = (W - L) / vals.length;
   const my = H - meta / max * H;
   return `<svg class="chart" viewBox="0 0 ${W} ${H + 18}">${vals.map((v, i) => {
     const h = Math.max(2, v / max * H), x = L + i * bw + 4, ok = v >= meta * 0.9 && v <= meta * 1.1;
-    return `<rect x="${x}" y="${H - h}" width="${bw - 8}" height="${h}" rx="4" fill="${!v ? '#2c3a32' : ok ? '#4ade80' : v > meta ? '#fbbf24' : '#60a5fa'}"/>
-      <text x="${x + (bw - 8) / 2}" y="${H + 14}" fill="#94a69b" font-size="10" text-anchor="middle">${labels[i]}</text>`;
-  }).join('')}<line x1="${L}" x2="${W}" y1="${my}" y2="${my}" stroke="#eef4f0" stroke-dasharray="4 4" opacity=".5"/><text x="0" y="${my + 4}" fill="#94a69b" font-size="9">meta</text></svg>`;
+    return `<rect x="${x}" y="${H - h}" width="${bw - 8}" height="${h}" rx="4" fill="${!v ? '#1f1f1f' : ok ? '#c6ff3d' : v > meta ? '#ffb020' : '#3dd6ff'}"/>
+      <text x="${x + (bw - 8) / 2}" y="${H + 14}" fill="#7d7d7d" font-size="10" text-anchor="middle">${labels[i]}</text>`;
+  }).join('')}<line x1="${L}" x2="${W}" y1="${my}" y2="${my}" stroke="#f5f5f5" stroke-dasharray="4 4" opacity=".5"/><text x="0" y="${my + 4}" fill="#7d7d7d" font-size="9">meta</text></svg>`;
 }
 
 /* desafio entre amigos, sem servidor: cada um compartilha um código da semana */
@@ -409,8 +410,8 @@ function desafioCard() {
   const me = weekScore(), f = S.challenge.amigo, mesma = f && f.w === me.w;
   return `<div class="card"><h3>🤝 Desafio da semana</h3>
     <p class="muted small">Pontos: +10 por dia registrado, +10 dentro da meta de kcal, +5 meta de água, +5 dormir 7h ou mais.</p>
-    <div class="grid2" style="margin:10px 0"><div class="card" style="margin:0;text-align:center"><div class="muted small">Você</div><b style="font-size:26px">${me.s}</b></div>
-      <div class="card" style="margin:0;text-align:center"><div class="muted small">${f ? esc(f.n) : 'Seu colega'}</div><b style="font-size:26px">${mesma ? f.s : '–'}</b>${f && !mesma ? '<div class="muted small">código de outra semana</div>' : ''}</div></div>
+    <div class="grid2" style="margin:10px 0"><div class="card" style="margin:0;text-align:center"><div class="muted small">Você</div><b class="stat">${me.s}</b></div>
+      <div class="card" style="margin:0;text-align:center"><div class="muted small">${f ? esc(f.n) : 'Seu colega'}</div><b class="stat">${mesma ? f.s : '–'}</b>${f && !mesma ? '<div class="muted small">código de outra semana</div>' : ''}</div></div>
     ${mesma ? `<p>${me.s > f.s ? '🏆 Você está ganhando!' : me.s < f.s ? `💪 ${esc(f.n)} está na frente. Bora!` : '🤝 Empatados!'}</p>` : ''}
     <button class="primary full" data-a="compartilhar">Enviar meu placar</button>
     <label>Cole o código do seu colega</label><div class="row"><input id="codAmigo" class="grow" placeholder="FIT-…"><button data-a="lerCodigo">OK</button></div></div>`;
@@ -487,7 +488,7 @@ function showPending() {
     <div class="card">${p.itens.map((x, i) => `<div class="meal"><div class="grow"><b>${esc(x.alimento)}</b><div class="muted small">${esc(x.porcao)} · ${r0(x.kcal)} kcal · P${r0(x.prot)} C${r0(x.carb)} G${r0(x.gord)}</div></div><button class="x" data-a="rmItem" data-v="${i}">✕</button></div>`).join('') || '<p class="muted">Nenhum item.</p>'}</div>
     <label>Quanto você comeu disso?</label>
     <div class="row wrap">${[[0.5, '½'], [0.75, '¾'], [1, 'Tudo'], [1.5, '1½'], [2, '2x']].map(([v, l]) => `<button class="chip ${f === v ? 'on' : ''}" data-a="fator" data-v="${v}">${l}</button>`).join('')}</div>
-    <div class="card" style="margin-top:12px;text-align:center"><b style="font-size:28px">${r0(t.kcal * f)} kcal</b><div class="muted">P ${r0(t.prot * f)} g · C ${r0(t.carb * f)} g · G ${r0(t.gord * f)} g</div></div>
+    <div class="card" style="margin-top:12px;text-align:center"><b class="stat">${r0(t.kcal * f)} kcal</b><div class="muted">P ${r0(t.prot * f)} g · C ${r0(t.carb * f)} g · G ${r0(t.gord * f)} g</div></div>
     ${p.dica ? `<p class="small">💡 ${esc(p.dica)}</p>` : ''}
     ${p.fonte !== 'codigo' ? `<label>A IA errou algo? Corrija aqui</label><textarea id="pCorr" placeholder="Ex.: o arroz era integral e foram 2 colheres"></textarea>
       <button class="full" style="margin-top:8px" data-a="recalc">Recalcular com a correção</button>` : ''}
@@ -541,7 +542,7 @@ function atualizaGramas() {
   const g = num($('#gramas')?.value) / 100, b = pending.base;
   pending.itens = [{ alimento: pending.nome, porcao: `${r0(g * 100)} g`, kcal: b.kcal * g, prot: b.prot * g, carb: b.carb * g, gord: b.gord * g }];
   const t = sumItens(pending.itens);
-  $('#gTot').innerHTML = `<b style="font-size:26px">${r0(t.kcal)} kcal</b><div class="muted">P ${r0(t.prot)} g · C ${r0(t.carb)} g · G ${r0(t.gord)} g</div>`;
+  $('#gTot').innerHTML = `<b class="stat">${r0(t.kcal)} kcal</b><div class="muted">P ${r0(t.prot)} g · C ${r0(t.carb)} g · G ${r0(t.gord)} g</div>`;
 }
 
 /* ---------- coach ---------- */
