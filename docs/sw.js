@@ -1,5 +1,5 @@
 // Guarda o app no celular para abrir na hora e funcionar sem internet.
-const CACHE = 'fitcoach-v4';
+const CACHE = 'fitcoach-v5';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

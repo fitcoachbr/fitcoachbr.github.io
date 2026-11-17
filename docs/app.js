@@ -93,7 +93,7 @@ let toastT;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2800); }
 function openSheet(html) { $('#sheetBody').innerHTML = html; $('#sheet').hidden = false; }
 function closeSheet() { $('#sheet').hidden = true; $('#sheetBody').innerHTML = ''; stopScanner(); }
-const loading = msg => `<div class="spinner"></div><p class="muted" style="text-align:center">${esc(msg)}</p>`;
+const loading = msg => `<div class="spinner"></div><p class="muted" style="text-align:center">${esc(msg)}</p><p id="iaStatus" class="mono" style="text-align:center;font-size:11px;color:var(--muted)"></p>`;
 const errBox = e => `<h3>Ops</h3><p>${esc(e.message || e)}</p><button class="full" data-a="closeSheet">Fechar</button>`;
 function md(s) {
   let h = esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
@@ -155,7 +155,7 @@ async function listModels(force) {
 // Pausa modelos que falharam, para não perder tempo com eles: ocupado 1 min, sem cota 15 min, não suportado 1 dia.
 const pausa = (() => { try { return JSON.parse(localStorage.getItem('fit-pausa') || '{}'); } catch { return {}; } })();
 function pausar(m, ms) { pausa[m] = Date.now() + ms; try { localStorage.setItem('fit-pausa', JSON.stringify(pausa)); } catch { } }
-function corpo(model, { prompt, image, json, history, system }) {
+function corpo(model, { prompt, image, json, history, system }, rapido = true) {
   const gemma = /^gemma/.test(model); // Gemma não aceita instrução de sistema nem modo JSON: vai tudo no texto
   let texto = prompt;
   if (gemma && system) texto = `${system}\n\n---\n${texto}`;
@@ -166,6 +166,12 @@ function corpo(model, { prompt, image, json, history, system }) {
   const body = { contents: [...history, { role: 'user', parts }], generationConfig: { temperature: json ? 0.4 : 0.8 } };
   if (json && !gemma) body.generationConfig.responseMimeType = 'application/json';
   if (system && !gemma) body.systemInstruction = { parts: [{ text: system }] };
+  // Modelos que "pensam" antes de responder podem levar minutos; pedimos o mínimo de raciocínio para ficar rápido.
+  if (rapido) {
+    if (/gemini-2\.5-flash/.test(model)) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    else if (/gemini-2\.5-pro/.test(model)) body.generationConfig.thinkingConfig = { thinkingBudget: 128 };
+    else if (/gemini-3|-latest$/.test(model)) body.generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+  }
   return body;
 }
 async function gemini({ prompt, image, json = true, history = [], system }) {
@@ -178,31 +184,47 @@ async function gemini({ prompt, image, json = true, history = [], system }) {
   if (image) models = models.filter(m => !/gemma-3-(1|4)b/.test(m));
   const agora = Date.now();
   const fila = [...models.filter(m => !(pausa[m] > agora)), ...models.filter(m => pausa[m] > agora)];
-  let d, last = '';
-  for (const model of fila) {
-    let r;
-    try {
-      r = await fetch(`${API}/${encodeURIComponent(model)}:generateContent`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify(corpo(model, { prompt, image, json, history, system })),
-      });
-    } catch { throw new Error('Não consegui falar com o Gemini. Verifique a internet.'); }
-    d = await r.json().catch(() => ({}));
-    if (r.ok && (d.candidates?.[0]?.content?.parts || []).some(p => p.text)) { S.lastModel = model; break; }
-    const m = d.error?.message || '';
-    if (/API key/i.test(m) || r.status === 403) throw new Error('Chave do Gemini inválida. Confira na aba Eu.');
-    if (r.status === 429) { last = 'cota'; pausar(model, 15 * 6e4); }
-    else if (r.status === 404 || r.status === 400) pausar(model, 864e5);
-    else if (r.ok) pausar(model, 6e4); // respondeu vazio (ex.: bloqueou a imagem): tenta outro
-    else { last ||= 'ocupado'; pausar(model, 6e4); }
-    d = null;
+  const status = t => { const el = $('#iaStatus'); if (el) el.textContent = t; };
+  const opts = { prompt, image, json, history, system };
+  let last = '';
+  for (let i = 0; i < fila.length; i++) {
+    const model = fila[i];
+    status(`Consultando ${model} (${i + 1} de ${fila.length})…`);
+    for (const rapido of [true, false]) { // se o modelo recusar o ajuste de velocidade, tenta sem ele
+      const ctrl = new AbortController(), limite = setTimeout(() => ctrl.abort(), 30000);
+      let r, d;
+      try {
+        r = await fetch(`${API}/${encodeURIComponent(model)}:generateContent`, {
+          method: 'POST', signal: ctrl.signal, headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+          body: JSON.stringify(corpo(model, opts, rapido)),
+        });
+        d = await r.json().catch(() => ({}));
+      } catch (e) {
+        clearTimeout(limite);
+        if (e.name === 'AbortError') { last ||= 'lento'; pausar(model, 5 * 6e4); break; } // demorou demais: próximo modelo
+        throw new Error('Não consegui falar com o Gemini. Verifique a internet.');
+      }
+      clearTimeout(limite);
+      const txt = (d.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('').trim();
+      if (r.ok && txt) {
+        if (!json) { S.lastModel = model; return txt; }
+        try { const out = parseJSON(txt); S.lastModel = model; return out; }
+        catch { pausar(model, 6e4); break; } // resposta fora do formato: tenta outro modelo
+      }
+      const m = d.error?.message || '';
+      if (/API key/i.test(m) || r.status === 403) throw new Error('Chave do Gemini inválida. Confira na aba Eu.');
+      if (r.status === 400 && rapido) continue;
+      if (r.status === 429) { last = 'cota'; pausar(model, 15 * 6e4); }
+      else if (r.status === 404 || r.status === 400) pausar(model, 864e5);
+      else if (r.ok) pausar(model, 6e4); // respondeu vazio (ex.: bloqueou a imagem)
+      else { last ||= 'ocupado'; pausar(model, 6e4); }
+      break;
+    }
   }
-  if (!d) throw new Error(last === 'cota'
+  throw new Error(last === 'cota'
     ? 'Você usou o limite grátis de todos os modelos do Gemini por agora. Espere alguns minutos e tente de novo.'
-    : 'Os servidores do Gemini estão congestionados agora. Tente de novo em 1 ou 2 minutos.');
-  const txt = (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
-  if (!txt) throw new Error('A IA não respondeu (talvez a imagem tenha sido bloqueada). Tente outra foto.');
-  return json ? parseJSON(txt) : txt.trim();
+    : last === 'lento' ? 'O Gemini está muito lento agora. Tente de novo em alguns minutos.'
+      : 'Os servidores do Gemini estão congestionados agora. Tente de novo em 1 ou 2 minutos.');
 }
 const perfilTxt = () => {
   const p = S.profile, t = targets();
