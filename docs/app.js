@@ -174,7 +174,8 @@ function corpo(model, { prompt, image, json, history, system }, rapido = true) {
   }
   return body;
 }
-async function gemini({ prompt, image, json = true, history = [], system }) {
+// tempo: limite total em ms. Refeição/foto/trocas: 10 s. Chat: 15 s. Dieta, treino e compras (textos longos): 60 s.
+async function gemini({ prompt, image, json = true, history = [], system, tempo = 10000 }) {
   const key = S.settings.apiKey;
   if (!key) throw new Error('Configure sua chave do Gemini na aba Eu → Inteligência artificial.');
   if (!navigator.onLine) throw new Error('Sem internet. A IA precisa de conexão; o resto do app funciona offline.');
@@ -184,14 +185,17 @@ async function gemini({ prompt, image, json = true, history = [], system }) {
   if (image) models = models.filter(m => !/gemma-3-(1|4)b/.test(m));
   const agora = Date.now();
   const fila = [...models.filter(m => !(pausa[m] > agora)), ...models.filter(m => pausa[m] > agora)];
-  const opts = { prompt, image, json, history, system };
+  // Para respostas curtas, o modelo "Lite" (o mais rápido) larga junto com o melhor modelo.
+  const lite = fila.findIndex(m => /lite/.test(m));
+  if (tempo <= 15000 && lite > 1) fila.splice(1, 0, fila.splice(lite, 1)[0]);
+  const opts = { prompt, image, json, history, system, tempo };
   const geral = new AbortController(), inicio = Date.now();
   const tipos = new Set();
   const final = () => tipos.has('cota') && !tipos.has('lento') && !tipos.has('ocupado')
     ? 'Você usou o limite grátis de todos os modelos do Gemini por agora. Espere alguns minutos e tente de novo.'
-    : tipos.has('lento') ? 'O Gemini está muito lento agora. Tente de novo em alguns minutos.'
+    : tipos.has('lento') ? `O Gemini não respondeu em ${Math.round(tempo / 1000)} segundos. Tente de novo.`
       : 'Os servidores do Gemini estão congestionados agora. Tente de novo em 1 ou 2 minutos.';
-  // Corrida: começa pelo melhor modelo; a cada 3 s sem resposta, abre mais um em paralelo (até 4 de uma vez).
+  // Corrida: largam juntos o melhor modelo e o mais rápido; a cada 1,5 s sem resposta entra mais um (até 4 de uma vez).
   // Se um falhar, o próximo entra na hora. A primeira resposta boa vence e as outras são canceladas.
   return new Promise((resolve, reject) => {
     let idx = 0, ativos = 0, fim = false;
@@ -211,16 +215,16 @@ async function gemini({ prompt, image, json = true, history = [], system }) {
         tipos.add(e.tipo); lancar();
       });
     };
-    const abre = setInterval(() => { if (ativos < 4) lancar(); }, 3000);
+    const abre = setInterval(() => { if (ativos < 4) lancar(); }, 1500);
     const relogio = setInterval(status, 1000);
-    const teto = setTimeout(() => { if (!fim) { tipos.add('lento'); encerrar(); reject(new Error(final())); } }, 45000);
-    lancar();
+    const teto = setTimeout(() => { if (!fim) { tipos.add('lento'); encerrar(); reject(new Error(final())); } }, tempo);
+    lancar(); lancar();
   });
 }
 const falha = (tipo, msg = tipo) => Object.assign(new Error(msg), { tipo });
 async function tentar(model, opts, key, geral) {
   for (const rapido of [true, false]) { // se o modelo recusar o ajuste de velocidade, tenta sem ele
-    const ctrl = new AbortController(), limite = setTimeout(() => ctrl.abort(), 25000), parar = () => ctrl.abort();
+    const ctrl = new AbortController(), limite = setTimeout(() => ctrl.abort(), opts.tempo), parar = () => ctrl.abort();
     geral.addEventListener('abort', parar);
     let r, d;
     try {
@@ -532,7 +536,7 @@ VIEWS.eu = () => {
     <div class="row"><button class="grow" data-a="exportar">Exportar</button><button class="grow" data-a="importar">Importar</button></div></div>
   <div class="card"><p class="muted small">O Fit Coach dá estimativas e orientações gerais. Ele não substitui nutricionista, médico ou educador físico. Calorias por foto podem errar 20–30%.</p>
     <button class="danger full" data-a="apagarTudo">Apagar todos os meus dados</button></div>
-  <p class="muted small" style="text-align:center">Fit Coach v1.2</p>`;
+  <p class="muted small" style="text-align:center">Fit Coach v1.3</p>`;
 };
 
 /* ---------- render ---------- */
@@ -667,7 +671,7 @@ async function enviar(texto) {
   try {
     let hist = S.chat.slice(-13, -1).map(m => ({ role: m.r === 'u' ? 'user' : 'model', parts: [{ text: m.t }] }));
     while (hist.length && hist[0].role !== 'user') hist.shift();
-    const resp = await gemini({ prompt: texto, history: hist, system: coachSystem(), json: false });
+    const resp = await gemini({ prompt: texto, history: hist, system: coachSystem(), json: false, tempo: 15000 });
     S.chat.push({ r: 'a', t: resp });
   } catch (e) { S.chat.push({ r: 'a', t: '⚠️ ' + e.message }); }
   S.chat = S.chat.slice(-60); S.typing = false; save('chat');
@@ -694,7 +698,7 @@ async function gerar(tipo) {
   const extra = $('#extra_' + tipo)?.value || '';
   S.busy[tipo] = true; render();
   try {
-    const r = await gemini({ prompt: PROMPTS[tipo](extra) });
+    const r = await gemini({ prompt: PROMPTS[tipo](extra), tempo: 60000 });
     S.plan[tipo] = tipo === 'compras' ? { ...r, marcados: {} } : r;
     if (tipo === 'dieta') delete S.plan.compras;
     save('plan'); toast('Pronto ✅');
