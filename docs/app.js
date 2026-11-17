@@ -574,7 +574,7 @@ VIEWS.eu = () => {
     <div class="row"><button class="grow" data-a="exportar">Exportar</button><button class="grow" data-a="importar">Importar</button></div></div>
   <div class="card"><p class="muted small">O Fit Coach dá estimativas e orientações gerais. Ele não substitui nutricionista, médico ou educador físico. Calorias por foto podem errar 20–30%.</p>
     <button class="danger full" data-a="apagarTudo">Apagar todos os meus dados</button></div>
-  <p class="muted small" style="text-align:center">Fit Coach v1.4</p>`;
+  <p class="muted small" style="text-align:center">Fit Coach v1.5</p>`;
 };
 
 /* ---------- render ---------- */
@@ -916,5 +916,9 @@ $('#fileBackup').addEventListener('change', e => { const f = e.target.files[0]; 
     let recarregou = false; // quando sai uma versão nova, recarrega uma vez sozinho
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (tinha && !recarregou) { recarregou = true; location.reload(); } });
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
+    // No iPhone o app instalado costuma só "voltar" da memória, sem reabrir: procura versão nova sempre que volta para a tela.
+    const checar = () => navigator.serviceWorker.getRegistration().then(r => r?.update()).catch(() => {});
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checar(); });
+    setInterval(checar, 30 * 6e4);
   }
 })();
