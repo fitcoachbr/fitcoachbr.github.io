@@ -10,7 +10,7 @@ App pessoal (PWA) de nutricionista + personal com IA, para o Guilherme e um cole
 - Comida por código de barras: API do Open Food Facts.
 
 ## Publicação
-- Repositório: github.com/guicorrea0805/fit-coach (público). Site: https://guicorrea0805.github.io/fit-coach/
+- Repositório: github.com/fitcoachbr/fitcoachbr.github.io (público, da organização fitcoachbr). Site: https://fitcoachbr.github.io/
 - Publicar = commit + `git push` na `main`. O Pages atualiza em 1–2 minutos.
 - GitHub CLI: `C:\Program Files\GitHub CLI\gh.exe` (já logado).
 
