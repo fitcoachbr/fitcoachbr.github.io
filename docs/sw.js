@@ -1,5 +1,6 @@
-// Guarda o app no celular para abrir na hora e funcionar sem internet.
-const CACHE = 'fitcoach-v5';
+// Guarda o app no celular para funcionar sem internet.
+// Com internet, busca sempre a versão mais nova (atualizações chegam na hora); sem internet, usa a cópia guardada.
+const CACHE = 'fitcoach-v6';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
@@ -11,13 +12,11 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
-  // Arquivos do app: responde do cache e atualiza em segundo plano.
   if (url.origin === location.origin) {
-    e.respondWith(caches.open(CACHE).then(async c => {
-      const hit = await c.match(e.request, { ignoreSearch: true });
-      const net = fetch(e.request).then(r => { if (r.ok) c.put(e.request, r.clone()); return r; }).catch(() => hit);
-      return hit || net;
-    }));
+    e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(r => {
+      if (r.ok) { const copia = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copia)); }
+      return r;
+    }).catch(() => caches.match(e.request, { ignoreSearch: true })));
     return;
   }
   // Leitor de código de barras: guarda após o primeiro uso.

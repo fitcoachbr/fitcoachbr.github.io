@@ -142,7 +142,7 @@ async function listModels(force) {
   const st = S.settings;
   if (!force && st.models?.length && Date.now() - (st.modelsAt || 0) < 864e5) return st.models;
   try {
-    const r = await fetch(`${API}?pageSize=200`, { headers: { 'x-goog-api-key': st.apiKey } });
+    const r = await fetch(`${API}?pageSize=200`, { headers: { 'x-goog-api-key': st.apiKey }, signal: AbortSignal.timeout(6000) });
     const d = await r.json();
     if (r.ok) {
       const ms = (d.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
@@ -184,47 +184,69 @@ async function gemini({ prompt, image, json = true, history = [], system }) {
   if (image) models = models.filter(m => !/gemma-3-(1|4)b/.test(m));
   const agora = Date.now();
   const fila = [...models.filter(m => !(pausa[m] > agora)), ...models.filter(m => pausa[m] > agora)];
-  const status = t => { const el = $('#iaStatus'); if (el) el.textContent = t; };
   const opts = { prompt, image, json, history, system };
-  let last = '';
-  for (let i = 0; i < fila.length; i++) {
-    const model = fila[i];
-    status(`Consultando ${model} (${i + 1} de ${fila.length})…`);
-    for (const rapido of [true, false]) { // se o modelo recusar o ajuste de velocidade, tenta sem ele
-      const ctrl = new AbortController(), limite = setTimeout(() => ctrl.abort(), 30000);
-      let r, d;
-      try {
-        r = await fetch(`${API}/${encodeURIComponent(model)}:generateContent`, {
-          method: 'POST', signal: ctrl.signal, headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-          body: JSON.stringify(corpo(model, opts, rapido)),
-        });
-        d = await r.json().catch(() => ({}));
-      } catch (e) {
-        clearTimeout(limite);
-        if (e.name === 'AbortError') { last ||= 'lento'; pausar(model, 5 * 6e4); break; } // demorou demais: próximo modelo
-        throw new Error('Não consegui falar com o Gemini. Verifique a internet.');
-      }
-      clearTimeout(limite);
-      const txt = (d.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('').trim();
-      if (r.ok && txt) {
-        if (!json) { S.lastModel = model; return txt; }
-        try { const out = parseJSON(txt); S.lastModel = model; return out; }
-        catch { pausar(model, 6e4); break; } // resposta fora do formato: tenta outro modelo
-      }
-      const m = d.error?.message || '';
-      if (/API key/i.test(m) || r.status === 403) throw new Error('Chave do Gemini inválida. Confira na aba Eu.');
-      if (r.status === 400 && rapido) continue;
-      if (r.status === 429) { last = 'cota'; pausar(model, 15 * 6e4); }
-      else if (r.status === 404 || r.status === 400) pausar(model, 864e5);
-      else if (r.ok) pausar(model, 6e4); // respondeu vazio (ex.: bloqueou a imagem)
-      else { last ||= 'ocupado'; pausar(model, 6e4); }
-      break;
-    }
-  }
-  throw new Error(last === 'cota'
+  const geral = new AbortController(), inicio = Date.now();
+  const tipos = new Set();
+  const final = () => tipos.has('cota') && !tipos.has('lento') && !tipos.has('ocupado')
     ? 'Você usou o limite grátis de todos os modelos do Gemini por agora. Espere alguns minutos e tente de novo.'
-    : last === 'lento' ? 'O Gemini está muito lento agora. Tente de novo em alguns minutos.'
-      : 'Os servidores do Gemini estão congestionados agora. Tente de novo em 1 ou 2 minutos.');
+    : tipos.has('lento') ? 'O Gemini está muito lento agora. Tente de novo em alguns minutos.'
+      : 'Os servidores do Gemini estão congestionados agora. Tente de novo em 1 ou 2 minutos.';
+  // Corrida: começa pelo melhor modelo; a cada 3 s sem resposta, abre mais um em paralelo (até 4 de uma vez).
+  // Se um falhar, o próximo entra na hora. A primeira resposta boa vence e as outras são canceladas.
+  return new Promise((resolve, reject) => {
+    let idx = 0, ativos = 0, fim = false;
+    const status = () => { const el = $('#iaStatus'); if (el) el.textContent = `${Math.round((Date.now() - inicio) / 1000)} s · ${ativos} modelo${ativos === 1 ? '' : 's'} trabalhando · ${idx} de ${fila.length} tentados`; };
+    const encerrar = () => { fim = true; geral.abort(); clearInterval(abre); clearInterval(relogio); clearTimeout(teto); };
+    const lancar = () => {
+      if (fim) return;
+      if (idx >= fila.length) { if (!ativos) { encerrar(); reject(new Error(final())); } return; }
+      const model = fila[idx++]; ativos++; status();
+      tentar(model, opts, key, geral.signal).then(out => {
+        if (fim) return;
+        encerrar(); S.lastModel = model; resolve(out);
+      }, e => {
+        ativos--;
+        if (fim) return;
+        if (e.fatal) { encerrar(); reject(e); return; }
+        tipos.add(e.tipo); lancar();
+      });
+    };
+    const abre = setInterval(() => { if (ativos < 4) lancar(); }, 3000);
+    const relogio = setInterval(status, 1000);
+    const teto = setTimeout(() => { if (!fim) { tipos.add('lento'); encerrar(); reject(new Error(final())); } }, 45000);
+    lancar();
+  });
+}
+const falha = (tipo, msg = tipo) => Object.assign(new Error(msg), { tipo });
+async function tentar(model, opts, key, geral) {
+  for (const rapido of [true, false]) { // se o modelo recusar o ajuste de velocidade, tenta sem ele
+    const ctrl = new AbortController(), limite = setTimeout(() => ctrl.abort(), 25000), parar = () => ctrl.abort();
+    geral.addEventListener('abort', parar);
+    let r, d;
+    try {
+      r = await fetch(`${API}/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST', signal: ctrl.signal, headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify(corpo(model, opts, rapido)),
+      });
+      d = await r.json().catch(() => ({}));
+    } catch (e) {
+      if (geral.aborted) throw falha('cancelado');
+      if (e.name === 'AbortError') { pausar(model, 5 * 6e4); throw falha('lento'); }
+      throw Object.assign(new Error('Não consegui falar com o Gemini. Verifique a internet.'), { fatal: true });
+    } finally { clearTimeout(limite); geral.removeEventListener('abort', parar); }
+    const txt = (d.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('').trim();
+    if (r.ok && txt) {
+      if (!opts.json) return txt;
+      try { return parseJSON(txt); } catch { pausar(model, 6e4); throw falha('ocupado'); }
+    }
+    const m = d.error?.message || '';
+    if (/API key/i.test(m) || r.status === 403) throw Object.assign(new Error('Chave do Gemini inválida. Confira na aba Eu.'), { fatal: true });
+    if (r.status === 400 && rapido) continue;
+    if (r.status === 429) { pausar(model, 15 * 6e4); throw falha('cota'); }
+    if (r.status === 404 || r.status === 400) { pausar(model, 864e5); throw falha('ocupado'); }
+    pausar(model, 6e4); throw falha('ocupado');
+  }
+  throw falha('ocupado');
 }
 const perfilTxt = () => {
   const p = S.profile, t = targets();
@@ -510,7 +532,7 @@ VIEWS.eu = () => {
     <div class="row"><button class="grow" data-a="exportar">Exportar</button><button class="grow" data-a="importar">Importar</button></div></div>
   <div class="card"><p class="muted small">O Fit Coach dá estimativas e orientações gerais. Ele não substitui nutricionista, médico ou educador físico. Calorias por foto podem errar 20–30%.</p>
     <button class="danger full" data-a="apagarTudo">Apagar todos os meus dados</button></div>
-  <p class="muted small" style="text-align:center">Fit Coach v1.0</p>`;
+  <p class="muted small" style="text-align:center">Fit Coach v1.2</p>`;
 };
 
 /* ---------- render ---------- */
@@ -846,5 +868,10 @@ $('#fileBackup').addEventListener('change', e => { const f = e.target.files[0]; 
   if (!S.settings.model || S.settings.model === 'gemini-flash-latest') S.settings.model = 'auto'; // versões antigas fixavam um modelo
   render();
   navigator.storage?.persist?.();
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    const tinha = !!navigator.serviceWorker.controller;
+    let recarregou = false; // quando sai uma versão nova, recarrega uma vez sozinho
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (tinha && !recarregou) { recarregou = true; location.reload(); } });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
+  }
 })();
