@@ -130,7 +130,7 @@ function parseJSON(t) {
 /* Usa TODOS os modelos grátis que a chave da pessoa enxerga, revezando quando um está ocupado ou sem cota. */
 const API = 'https://generativelanguage.googleapis.com/v1beta/models';
 const RESERVA = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite', 'gemini-2.0-flash-lite', 'gemma-3-27b-it', 'gemma-3-12b-it'];
-const FORA = /embedding|tts|image|imagen|veo|live|audio|aqa|robotics|computer-use|learnlm|exp-|nano|-e\d+b|1b-it|4b-it/i;
+const FORA = /embedding|tts|image|imagen|veo|live|audio|aqa|robotics|computer-use|customtools|transcribe|learnlm|exp-|nano|-e\d+b|1b-it|4b-it/i;
 function rankModel(n) {
   const v = parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0');
   const tam = parseFloat((n.match(/(\d+)b-it/) || [])[1] || '0');
@@ -155,6 +155,39 @@ async function listModels(force) {
 // Pausa modelos que falharam, para não perder tempo com eles: ocupado 1 min, sem cota 15 min, não suportado 1 dia.
 const pausa = (() => { try { return JSON.parse(localStorage.getItem('fit-pausa') || '{}'); } catch { return {}; } })();
 function pausar(m, ms) { pausa[m] = Date.now() + ms; try { localStorage.setItem('fit-pausa', JSON.stringify(pausa)); } catch { } }
+// Aprende com a chave de cada pessoa: quais modelos respondem e em quanto tempo. Os mais rápidos vão para a frente.
+const stats = (() => { try { return JSON.parse(localStorage.getItem('fit-stats') || '{}'); } catch { return {}; } })();
+function registrar(m, ok, ms) {
+  const s = stats[m] || { ms: 0, ok: 0 };
+  if (ok) s.ms = s.ok ? s.ms * 0.6 + ms * 0.4 : ms;
+  s.ok = ok ? s.ok + 1 : s.ok; s.ultimo = ok ? 'ok' : 'falha'; s.t = Date.now();
+  stats[m] = s;
+  try { localStorage.setItem('fit-stats', JSON.stringify(stats)); } catch { }
+}
+function ordenar(models) {
+  const agora = Date.now();
+  const nota = (m, i) => {
+    if (pausa[m] > agora) return 1e6 + i;          // pausados por último
+    const s = stats[m];
+    if (s?.ultimo === 'ok') return s.ms;           // já respondeu: ordena pelo tempo médio
+    if (!s) return 2e4 + i;                        // nunca testado: depois dos bons
+    return 5e4 + i;                                // falhou da última vez
+  };
+  return models.map((m, i) => [m, nota(m, i)]).sort((a, b) => a[1] - b[1]).map(x => x[0]);
+}
+// Testa todos os modelos em paralelo com uma pergunta mínima, para já saber quais são rápidos (1x a cada 12 h).
+async function aquecer(force) {
+  const st = S.settings;
+  if (!st.apiKey || (!force && Date.now() - (st.aquecidoEm || 0) < 432e5)) return;
+  st.aquecidoEm = Date.now(); save('settings');
+  const ms = (await listModels(force)).filter(m => !(pausa[m] > Date.now()));
+  const sinal = new AbortController().signal;
+  await Promise.all(ms.map(async m => {
+    const t = Date.now();
+    try { await tentar(m, { prompt: 'Responda só: ok', json: false, history: [], tempo: 15000 }, st.apiKey, sinal); registrar(m, true, Date.now() - t); }
+    catch (e) { if (!e.fatal) registrar(m, false); }
+  }));
+}
 function corpo(model, { prompt, image, json, history, system }, rapido = true) {
   const gemma = /^gemma/.test(model); // Gemma não aceita instrução de sistema nem modo JSON: vai tudo no texto
   let texto = prompt;
@@ -170,7 +203,8 @@ function corpo(model, { prompt, image, json, history, system }, rapido = true) {
   if (rapido) {
     if (/gemini-2\.5-flash/.test(model)) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
     else if (/gemini-2\.5-pro/.test(model)) body.generationConfig.thinkingConfig = { thinkingBudget: 128 };
-    else if (/gemini-3|-latest$/.test(model)) body.generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+    else if (/pro/.test(model)) body.generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+    else if (/gemini-[3-9]|-latest$/.test(model)) body.generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
   }
   return body;
 }
@@ -183,11 +217,11 @@ async function gemini({ prompt, image, json = true, history = [], system, tempo 
   const fixo = S.settings.model;
   if (fixo && fixo !== 'auto') models = [fixo, ...models.filter(m => m !== fixo)];
   if (image) models = models.filter(m => !/gemma-3-(1|4)b/.test(m));
-  const agora = Date.now();
-  const fila = [...models.filter(m => !(pausa[m] > agora)), ...models.filter(m => pausa[m] > agora)];
-  // Para respostas curtas, o modelo "Lite" (o mais rápido) larga junto com o melhor modelo.
+  const fila = ordenar(models);
+  if (fixo && fixo !== 'auto') fila.splice(fila.indexOf(fixo), 1), fila.unshift(fixo);
+  // Sem histórico ainda: o modelo "Lite" (em geral o mais rápido) larga junto com o primeiro.
   const lite = fila.findIndex(m => /lite/.test(m));
-  if (tempo <= 15000 && lite > 1) fila.splice(1, 0, fila.splice(lite, 1)[0]);
+  if (!Object.keys(stats).length && lite > 1) fila.splice(1, 0, fila.splice(lite, 1)[0]);
   const opts = { prompt, image, json, history, system, tempo };
   const geral = new AbortController(), inicio = Date.now();
   const tipos = new Set();
@@ -204,12 +238,14 @@ async function gemini({ prompt, image, json = true, history = [], system, tempo 
     const lancar = () => {
       if (fim) return;
       if (idx >= fila.length) { if (!ativos) { encerrar(); reject(new Error(final())); } return; }
-      const model = fila[idx++]; ativos++; status();
+      const model = fila[idx++], t0 = Date.now(); ativos++; status();
       tentar(model, opts, key, geral.signal).then(out => {
+        registrar(model, true, Date.now() - t0);
         if (fim) return;
         encerrar(); S.lastModel = model; resolve(out);
       }, e => {
         ativos--;
+        if (e.tipo !== 'cancelado' && !e.fatal) registrar(model, false);
         if (fim) return;
         if (e.fatal) { encerrar(); reject(e); return; }
         tipos.add(e.tipo); lancar();
@@ -246,8 +282,10 @@ async function tentar(model, opts, key, geral) {
     const m = d.error?.message || '';
     if (/API key/i.test(m) || r.status === 403) throw Object.assign(new Error('Chave do Gemini inválida. Confira na aba Eu.'), { fatal: true });
     if (r.status === 400 && rapido) continue;
-    if (r.status === 429) { pausar(model, 15 * 6e4); throw falha('cota'); }
-    if (r.status === 404 || r.status === 400) { pausar(model, 864e5); throw falha('ocupado'); }
+    // Sem cota grátis nenhuma ("limit: 0") ou modelo aposentado: deixa de lado por dias. Cota do dia/minuto esgotada: 30 min.
+    if (r.status === 429) { pausar(model, /limit: 0\b/.test(m) ? 7 * 864e5 : 30 * 6e4); throw falha('cota'); }
+    if (r.status === 404) { pausar(model, 30 * 864e5); throw falha('ocupado'); }
+    if (r.status === 400) { pausar(model, 864e5); throw falha('ocupado'); }
     pausar(model, 6e4); throw falha('ocupado');
   }
   throw falha('ocupado');
@@ -536,7 +574,7 @@ VIEWS.eu = () => {
     <div class="row"><button class="grow" data-a="exportar">Exportar</button><button class="grow" data-a="importar">Importar</button></div></div>
   <div class="card"><p class="muted small">O Fit Coach dá estimativas e orientações gerais. Ele não substitui nutricionista, médico ou educador físico. Calorias por foto podem errar 20–30%.</p>
     <button class="danger full" data-a="apagarTudo">Apagar todos os meus dados</button></div>
-  <p class="muted small" style="text-align:center">Fit Coach v1.3</p>`;
+  <p class="muted small" style="text-align:center">Fit Coach v1.4</p>`;
 };
 
 /* ---------- render ---------- */
@@ -805,12 +843,12 @@ Responda APENAS em JSON: {"original":{"kcal":0,"prot":0,"carb":0,"gord":0},"opco
     S.settings.apiKey = nova; S.settings.model = $('#model').value || 'auto';
     if (mudou) { S.settings.models = []; S.settings.modelsAt = 0; }
     save('settings'); toast('Salvo ✅');
-    if (nova && mudou) await listModels(true);
+    if (nova && mudou) { await listModels(true); aquecer(true).then(() => S.tab === 'eu' && render()); }
     render();
   },
   testarKey: async () => {
     await A.salvarKey(); toast('Testando…');
-    try { await listModels(true); await gemini({ prompt: 'Responda só: ok', json: false }); render(); toast(`Funcionando com ${S.lastModel} ✅`); }
+    try { await aquecer(true); await gemini({ prompt: 'Responda só: ok', json: false }); render(); toast(`Funcionando com ${S.lastModel} ✅`); }
     catch (e) { toast(e.message); }
   },
   exportar,
@@ -872,6 +910,7 @@ $('#fileBackup').addEventListener('change', e => { const f = e.target.files[0]; 
   if (!S.settings.model || S.settings.model === 'gemini-flash-latest') S.settings.model = 'auto'; // versões antigas fixavam um modelo
   render();
   navigator.storage?.persist?.();
+  aquecer().catch(() => {}); // em segundo plano: descobre os modelos mais rápidos da chave
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     const tinha = !!navigator.serviceWorker.controller;
     let recarregou = false; // quando sai uma versão nova, recarrega uma vez sozinho
